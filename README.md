@@ -98,6 +98,7 @@ The current subset supports:
 Unsupported constructs are rejected with stable syntax or type diagnostics. Current rejected areas include `any`, dynamic imports, `eval`, `Proxy`, `Reflect`, exceptions, async/generators, loops, and dynamic object behavior.
 
 See [docs/subset.md](docs/subset.md) for the semantic contract and [docs/abi.md](docs/abi.md) for the support ABI.
+Background research is archived in [docs/research](docs/research/README.md).
 
 ## Development
 
