@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/cli", "crates/codegen", "crates/driver", "crates/hir", "crates/mir", "crates/syntax", "crates/typecheck"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"

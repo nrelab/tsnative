@@ -1,0 +1,17 @@
+[package]
+name = "tsnative-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tsnative-codegen = { path = "../codegen" }
+ts-native-driver = { package = "tsnative-driver", path = "../driver" }
+ts-native-hir = { package = "tsnative-hir", path = "../hir" }
+tsnative-mir = { path = "../mir" }
+tsnative-syntax = { path = "../syntax" }
+tsnative-typecheck = { path = "../typecheck" }
+
+[[bin]]
+name = "tsnative"
+path = "src/main.rs"

@@ -1,0 +1,12 @@
+[package]
+name = "tsnative-mir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ts-native-hir = { package = "tsnative-hir", path = "../hir" }
+ts-native-syntax = { package = "tsnative-syntax", path = "../syntax" }
+
+[dev-dependencies]
+tsnative-typecheck = { path = "../typecheck" }
