@@ -94,6 +94,16 @@ fn check_function(
         .iter()
         .map(|statement| check_statement(statement, &locals, signatures, return_type))
         .collect::<Result<Vec<_>, _>>()?;
+    if !block_always_returns(&body) {
+        return Err(error(
+            "E1006",
+            format!(
+                "function {} may fall through without returning a value",
+                function.name
+            ),
+            function.span,
+        ));
+    }
     Ok(hir::Function {
         name: function.name.clone(),
         parameters,
@@ -101,6 +111,25 @@ fn check_function(
         body,
         span: function.span,
     })
+}
+
+fn block_always_returns(statements: &[hir::Statement]) -> bool {
+    statements.iter().any(statement_always_returns)
+}
+
+fn statement_always_returns(statement: &hir::Statement) -> bool {
+    match statement {
+        hir::Statement::Return { .. } => true,
+        hir::Statement::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            !else_body.is_empty()
+                && block_always_returns(then_body)
+                && block_always_returns(else_body)
+        }
+    }
 }
 
 fn check_statement(
@@ -306,5 +335,13 @@ mod tests {
         let syntax = parse("function broken(n: number): number { return missing; }").unwrap();
         let error = check(&syntax).unwrap_err();
         assert_eq!(error.code, "E1001");
+    }
+
+    #[test]
+    fn rejects_functions_that_can_fall_through() {
+        let syntax =
+            parse("function missing(n: number): number { if (n < 2) { return n; } }").unwrap();
+        let error = check(&syntax).unwrap_err();
+        assert_eq!(error.code, "E1006");
     }
 }

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use ts_native_hir as hir;
 use ts_native_syntax::{BinaryOperator, Span};
@@ -91,6 +94,298 @@ pub fn lower(program: &hir::Program) -> Result<Program, LowerError> {
             .map(lower_function)
             .collect::<Result<Vec<_>, _>>()?,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl fmt::Display for VerifyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for VerifyError {}
+
+pub fn verify(program: &Program) -> Result<(), VerifyError> {
+    let mut signatures = HashMap::new();
+    for function in &program.functions {
+        if signatures
+            .insert(
+                function.name.as_str(),
+                (&function.parameters, function.return_type),
+            )
+            .is_some()
+        {
+            return Err(verify_error(
+                "E3001",
+                format!("duplicate MIR function: {}", function.name),
+            ));
+        }
+    }
+    for function in &program.functions {
+        verify_function(function, &signatures)?;
+    }
+    Ok(())
+}
+
+fn verify_function<'a>(
+    function: &Function,
+    signatures: &HashMap<&'a str, (&'a Vec<hir::Type>, hir::Type)>,
+) -> Result<(), VerifyError> {
+    if function.blocks.is_empty() || function.entry.0 >= function.blocks.len() {
+        return Err(verify_error(
+            "E3002",
+            format!("invalid entry block in {}", function.name),
+        ));
+    }
+
+    let reachable = reachable_blocks(function);
+    if reachable.len() != function.blocks.len() {
+        return Err(verify_error(
+            "E3003",
+            format!("unreachable block in {}", function.name),
+        ));
+    }
+
+    let mut definitions = HashMap::new();
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+            if definitions
+                .insert(
+                    instruction.result,
+                    (instruction.ty, block_index, instruction_index),
+                )
+                .is_some()
+            {
+                return Err(verify_error(
+                    "E3004",
+                    format!("duplicate SSA value %v{}", instruction.result.0),
+                ));
+            }
+        }
+    }
+
+    for (block_index, block) in function.blocks.iter().enumerate() {
+        for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+            match &instruction.kind {
+                InstructionKind::Number(_) if instruction.ty != hir::Type::Number => {
+                    return Err(verify_error(
+                        "E3005",
+                        "number constant has non-number type".to_owned(),
+                    ));
+                }
+                InstructionKind::Boolean(_) if instruction.ty != hir::Type::Boolean => {
+                    return Err(verify_error(
+                        "E3005",
+                        "boolean constant has non-boolean type".to_owned(),
+                    ));
+                }
+                InstructionKind::Number(_) | InstructionKind::Boolean(_) => {}
+                InstructionKind::LoadParam(index) => {
+                    let Some(parameter_type) = function.parameters.get(*index) else {
+                        return Err(verify_error(
+                            "E3006",
+                            format!("parameter index out of range: {index}"),
+                        ));
+                    };
+                    if instruction.ty != *parameter_type {
+                        return Err(verify_error(
+                            "E3005",
+                            "parameter load has incorrect type".to_owned(),
+                        ));
+                    }
+                }
+                InstructionKind::Binary {
+                    left,
+                    operator,
+                    right,
+                } => {
+                    let left_type =
+                        value_type(*left, block_index, instruction_index, &definitions)?;
+                    let right_type =
+                        value_type(*right, block_index, instruction_index, &definitions)?;
+                    let expected = match operator {
+                        BinaryOperator::Add
+                        | BinaryOperator::Subtract
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide => {
+                            if left_type != hir::Type::Number || right_type != hir::Type::Number {
+                                return Err(verify_error(
+                                    "E3005",
+                                    "arithmetic operands must be numbers".to_owned(),
+                                ));
+                            }
+                            hir::Type::Number
+                        }
+                        BinaryOperator::LessThan => {
+                            if left_type != hir::Type::Number || right_type != hir::Type::Number {
+                                return Err(verify_error(
+                                    "E3005",
+                                    "less-than operands must be numbers".to_owned(),
+                                ));
+                            }
+                            hir::Type::Boolean
+                        }
+                        BinaryOperator::Equal => {
+                            if left_type != right_type {
+                                return Err(verify_error(
+                                    "E3005",
+                                    "equality operands must have matching types".to_owned(),
+                                ));
+                            }
+                            hir::Type::Boolean
+                        }
+                    };
+                    if instruction.ty != expected {
+                        return Err(verify_error(
+                            "E3005",
+                            "binary result has incorrect type".to_owned(),
+                        ));
+                    }
+                }
+                InstructionKind::Call { callee, arguments } => {
+                    let Some((parameters, return_type)) = signatures.get(callee.as_str()) else {
+                        return Err(verify_error(
+                            "E3007",
+                            format!("unknown MIR call target: {callee}"),
+                        ));
+                    };
+                    if arguments.len() != parameters.len() {
+                        return Err(verify_error(
+                            "E3008",
+                            format!("call to {callee} has incorrect argument count"),
+                        ));
+                    }
+                    for (argument, expected) in arguments.iter().zip(parameters.iter()) {
+                        if value_type(*argument, block_index, instruction_index, &definitions)?
+                            != *expected
+                        {
+                            return Err(verify_error(
+                                "E3005",
+                                format!("call to {callee} has an argument type mismatch"),
+                            ));
+                        }
+                    }
+                    if instruction.ty != *return_type {
+                        return Err(verify_error(
+                            "E3005",
+                            format!("call to {callee} has an incorrect result type"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let Some(terminator) = &block.terminator else {
+            return Err(verify_error(
+                "E3002",
+                format!("block {block_index} has no terminator"),
+            ));
+        };
+        match terminator {
+            Terminator::Return(value) => {
+                if value_type(*value, block_index, block.instructions.len(), &definitions)?
+                    != function.return_type
+                {
+                    return Err(verify_error(
+                        "E3005",
+                        format!("return type mismatch in {}", function.name),
+                    ));
+                }
+            }
+            Terminator::Branch {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                if value_type(
+                    *condition,
+                    block_index,
+                    block.instructions.len(),
+                    &definitions,
+                )? != hir::Type::Boolean
+                {
+                    return Err(verify_error(
+                        "E3005",
+                        "branch condition must be boolean".to_owned(),
+                    ));
+                }
+                verify_block_reference(function, *then_block)?;
+                verify_block_reference(function, *else_block)?;
+            }
+            Terminator::Jump(next) => verify_block_reference(function, *next)?,
+        }
+    }
+    Ok(())
+}
+
+fn value_type(
+    value: ValueId,
+    block_index: usize,
+    instruction_index: usize,
+    definitions: &HashMap<ValueId, (hir::Type, usize, usize)>,
+) -> Result<hir::Type, VerifyError> {
+    let Some((ty, definition_block, definition_index)) = definitions.get(&value).copied() else {
+        return Err(verify_error(
+            "E3009",
+            format!("use of undefined SSA value %v{}", value.0),
+        ));
+    };
+    if definition_block == block_index && definition_index >= instruction_index {
+        return Err(verify_error(
+            "E3010",
+            format!("SSA value %v{} used before definition", value.0),
+        ));
+    }
+    Ok(ty)
+}
+
+fn verify_block_reference(function: &Function, block: BlockId) -> Result<(), VerifyError> {
+    if block.0 >= function.blocks.len() {
+        return Err(verify_error(
+            "E3002",
+            format!("invalid block reference: {}", block.0),
+        ));
+    }
+    Ok(())
+}
+
+fn reachable_blocks(function: &Function) -> HashSet<usize> {
+    let mut reachable = HashSet::new();
+    let mut pending = vec![function.entry.0];
+    while let Some(block) = pending.pop() {
+        if !reachable.insert(block) {
+            continue;
+        }
+        let Some(terminator) = function
+            .blocks
+            .get(block)
+            .and_then(|block| block.terminator.as_ref())
+        else {
+            continue;
+        };
+        match terminator {
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                pending.push(then_block.0);
+                pending.push(else_block.0);
+            }
+            Terminator::Jump(next) => pending.push(next.0),
+            Terminator::Return(_) => {}
+        }
+    }
+    reachable
+}
+
+fn verify_error(code: &'static str, message: String) -> VerifyError {
+    VerifyError { code, message }
 }
 
 fn lower_function(function: &hir::Function) -> Result<Function, LowerError> {
@@ -395,7 +690,10 @@ fn runtime_error(message: String) -> RuntimeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Terminator, Value, evaluate, lower};
+    use super::{
+        BasicBlock, BlockId, Function, Program, Terminator, Value, ValueId, evaluate, lower, verify,
+    };
+    use ts_native_hir::Type;
     use ts_native_syntax::parse;
     use tsnative_typecheck::check;
 
@@ -405,6 +703,7 @@ mod tests {
         let syntax = parse(source).unwrap();
         let typed = check(&syntax).unwrap();
         let mir = lower(&typed).unwrap();
+        verify(&mir).unwrap();
         assert!(
             mir.functions[0]
                 .blocks
@@ -415,5 +714,23 @@ mod tests {
             evaluate(&mir, "fib", &[Value::Number(10.0)]).unwrap(),
             Value::Number(55.0)
         );
+    }
+
+    #[test]
+    fn rejects_undefined_ssa_values() {
+        let program = Program {
+            functions: vec![Function {
+                name: "bad".to_owned(),
+                parameters: Vec::new(),
+                return_type: Type::Number,
+                blocks: vec![BasicBlock {
+                    instructions: Vec::new(),
+                    terminator: Some(Terminator::Return(ValueId(0))),
+                }],
+                entry: BlockId(0),
+            }],
+        };
+        let error = verify(&program).unwrap_err();
+        assert_eq!(error.code, "E3009");
     }
 }

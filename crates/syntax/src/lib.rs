@@ -112,6 +112,7 @@ impl std::error::Error for SyntaxError {}
 #[derive(Debug, Clone, PartialEq)]
 enum TokenKind {
     Identifier(String),
+    Unsupported(String),
     Number(f64),
     True,
     False,
@@ -174,6 +175,9 @@ fn lex(source: &str) -> Result<Vec<Token>, SyntaxError> {
                     "false" => TokenKind::False,
                     "number" => TokenKind::NumberType,
                     "boolean" => TokenKind::BooleanType,
+                    "any" | "eval" | "import" | "export" | "async" | "await" | "throw" | "try"
+                    | "catch" | "for" | "while" | "switch" | "class" | "new" | "Proxy"
+                    | "Reflect" => TokenKind::Unsupported(word.to_owned()),
                     _ => TokenKind::Identifier(word.to_owned()),
                 }
             }
@@ -286,6 +290,7 @@ impl Parser {
     fn parse_program(&mut self) -> Result<Program, SyntaxError> {
         let mut functions = Vec::new();
         while !self.at(&TokenKind::Eof) {
+            self.reject_unsupported()?;
             functions.push(self.parse_function()?);
         }
         Ok(Program { functions })
@@ -341,6 +346,7 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, SyntaxError> {
+        self.reject_unsupported()?;
         if self.take(&TokenKind::Return) {
             let start = self.previous().span.start;
             let value = self.parse_expression()?;
@@ -458,6 +464,11 @@ impl Parser {
                 self.expect(TokenKind::RightParen)?;
                 Ok(expression)
             }
+            TokenKind::Unsupported(name) => Err(SyntaxError {
+                code: "E0003",
+                message: format!("unsupported syntax: {name}"),
+                span: token.span,
+            }),
             _ => self.error("expected expression"),
         }
     }
@@ -473,6 +484,11 @@ impl Parser {
                 self.position += 1;
                 Ok(Type::Boolean)
             }
+            TokenKind::Unsupported(name) => Err(SyntaxError {
+                code: "E0003",
+                message: format!("unsupported type or construct: {name}"),
+                span: token.span,
+            }),
             _ => self.error("expected number or boolean type"),
         }
     }
@@ -541,6 +557,17 @@ impl Parser {
         &self.tokens[self.position - 1]
     }
 
+    fn reject_unsupported(&self) -> Result<(), SyntaxError> {
+        if let TokenKind::Unsupported(name) = &self.current().kind {
+            return Err(SyntaxError {
+                code: "E0003",
+                message: format!("unsupported syntax: {name}"),
+                span: self.current().span,
+            });
+        }
+        Ok(())
+    }
+
     fn error<T>(&self, message: &str) -> Result<T, SyntaxError> {
         Err(SyntaxError {
             code: "E0002",
@@ -587,5 +614,19 @@ mod tests {
         let error = parse("function broken(n: number): number { return n }").unwrap_err();
         assert_eq!(error.code, "E0002");
         assert!(error.message.contains("Semicolon"));
+    }
+
+    #[test]
+    fn reports_unsupported_type_with_stable_code() {
+        let error = parse("function dynamic(value: any): number { return 1; }").unwrap_err();
+        assert_eq!(error.code, "E0003");
+        assert!(error.message.contains("any"));
+    }
+
+    #[test]
+    fn reports_unsupported_expression_with_stable_code() {
+        let error = parse("function dynamic(): number { return eval(1); }").unwrap_err();
+        assert_eq!(error.code, "E0003");
+        assert!(error.message.contains("eval"));
     }
 }

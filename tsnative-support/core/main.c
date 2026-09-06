@@ -1,8 +1,12 @@
 #include <stdio.h>
 
-extern double tsnative_main(void);
+#include "runtime.h"
+
+void tsnative_print_number(double value) {
+    printf("%.17g\n", value);
+}
 
 int main(void) {
-    printf("%.17g\n", tsnative_main());
+    tsnative_print_number(tsnative_main());
     return 0;
 }

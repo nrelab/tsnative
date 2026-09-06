@@ -18,7 +18,18 @@ impl fmt::Display for CodegenError {
 impl std::error::Error for CodegenError {}
 
 pub fn emit(program: &Program) -> Result<String, CodegenError> {
-    let mut output = String::from("; ModuleID = 'tsnative'\nsource_filename = \"tsnative\"\n\n");
+    emit_for_target(program, None)
+}
+
+pub fn emit_for_target(
+    program: &Program,
+    target_triple: Option<&str>,
+) -> Result<String, CodegenError> {
+    let mut output = String::from("; ModuleID = 'tsnative'\nsource_filename = \"tsnative\"\n");
+    if let Some(target_triple) = target_triple {
+        writeln!(output, "target triple = \"{target_triple}\"").unwrap();
+    }
+    output.push('\n');
     for function in &program.functions {
         emit_function(&mut output, function)?;
         output.push('\n');
@@ -244,7 +255,7 @@ fn format_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::emit;
+    use super::{emit, emit_for_target};
     use ts_native_mir::lower;
     use ts_native_syntax::parse;
     use tsnative_typecheck::check;
@@ -260,5 +271,8 @@ mod tests {
         assert!(llvm.contains("fcmp olt double"));
         assert!(llvm.contains("call double @tsnative_fib"));
         assert!(llvm.contains("br i1"));
+
+        let targeted = emit_for_target(&mir, Some("x86_64-apple-darwin")).unwrap();
+        assert!(targeted.contains("target triple = \"x86_64-apple-darwin\""));
     }
 }
